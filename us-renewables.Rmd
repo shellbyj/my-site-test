@@ -6,6 +6,205 @@ output: html_document
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+
+
+```{r}
+
+library(lubridate)
+library(janitor)
+library(tidyverse)
+library(paletteer)
+library(tsibble)
+library(fable)
+library(fabletools)
+library(feasts)
+library(forecast)
+library(sf)
+library(tmap)
+library(here)
+library(mapview)
+
+```
+
+
+
+##Monthly US energy consumption (renwables)
+
+```{r}
+us_renew <- read_csv(here("data", "renewables_cons_prod.csv")) %>% 
+  clean_names()
+
+```
+
+
+- Make the description all lowercase and keep obervations where the description variable comtains the string pattern "consumption""
+-Also gonna remove any observation where the "description"" variable contains "total"
+
+```{r}
+renew_clean <- us_renew %>% 
+  mutate(description = str_to_lower(description)) %>% 
+  filter(str_detect(description, pattern = "consumption")) %>% 
+  filter(!str_detect(description, pattern = "total")) #! means do not detect, so if it runs across an observation that does not have "consumption, it will keep it"
+
+```
+
+### Convert 'yyyymm' column to a date
+
+```{r}
+
+renew_date <- renew_clean %>% 
+  mutate(yr_mo_day = lubridate::parse_date_time(yyyymm,"ym")) %>% 
+  mutate(month_sep = yearmonth(yr_mo_day)) %>%# makes the date column only a month abbreviation and a year and separates the day
+  mutate(value = as.numeric(value)) %>% 
+  drop_na(month_sep, value)
+
+#Make a version where teh month and year is in separate columns
+
+renew_parse <- renew_date %>% 
+  mutate(month = month(yr_mo_day, label = TRUE)) %>% 
+  mutate(year = year(yr_mo_day))## creates a column of a class of ordered factors that only contains the month abbreviation
+
+```
+
+
+
+##Look at it.
+
+```{r}
+
+renew_gg <- ggplot(data = renew_date, aes(x = month_sep,
+                                          y = value,
+                                          group = description))+
+                                          geom_line(aes(color = description))+
+                                          theme_classic()+
+                                          scale_y_continuous(0,350)
+
+renew_gg
+                   
+                
+
+```
+
+
+##Updating my colors with paletter palettes
+
+```{r}
+
+renew_gg +
+  scale_color_paletteer_d("calecopal::figmtn")
+
+```
+
+
+### Coerce our renew_parse to a sibble, a time-series enables data frame
+
+```{r}
+
+renew_ts <- as_tsibble(renew_parse, key = description, index = month_sep)
+
+##index is the sibble compatible time variable that we created (the 'month_sep)
+
+```
+
+Lets look at our time series data in a couple different ways
+```{r}
+
+renew_ts %>% autoplot(value)
+renew_ts %>% gg_subseries(value)
+##renew_ts %>% gg_season(value) did not work
+
+ggplot(data = renew_parse, aes(x = month, y = value, group = year))+
+  geom_line(aes(color = year))+
+  facet_wrap(~description,
+             ncol = 1,
+             scales = "free", 
+             strip.position = "right")
+
+```
+
+
+##Just look at the hydroelectric eneergy consumption
+
+```{r}
+
+hydro_ts <- renew_ts %>% 
+  filter(description == "hydroelectric power consumption")
+
+##hydro_ts %>% autoplot(value)
+
+ggplot(hydro_ts, aes(x = month, y = value, group = year))+
+  geom_line(aes(color = year))
+
+```
+
+
+### What is I want quarterly average consumption for hydro?
+
+```{r}
+
+hydro_quarterly <- hydro_ts %>% 
+  index_by(year_qu = ~ yearquarter(.)) %>% 
+  summarize(avg_consumption = mean(value))
+
+head(hydro_quarterly)
+
+```
+
+### Decompose that hydro_ts
+
+```{r}
+dcmp <- hydro_ts %>% 
+  model(STL(value ~ season(window = 5)))
+
+
+components(dcmp) %>% autoplot()
+
+
+```
+
+
+```{r}
+hist(components(dcmp)$remainder)
+
+```
+
+# Now lets look at the ACF
+
+```{r}
+
+ hydro_ts %>% 
+  ACF(value) %>% 
+  autoplot()
+
+## ACF shows that observations that are 12 months apart are more correlated than other time period
+```
+
+# DANGER DANGER
+
+```{r}
+hydro_model <- hydro_ts %>% 
+  model(
+    ARIMA(value)
+  ) %>% 
+fabletools::forecast(h = "4 years")
+
+hydro_model %>% autoplot(filter(hydro_ts, year(month_sep) > 2010))
+
+```
+
+### Now lets make a world map
+
+```{r}
+
+world <- read_sf(dsn = here("data", "TM_WORLD_BORDERS_SIMPL-0.3-1"),
+                 layer = "TM_WORLD_BORDERS_SIMPL-0.3")
+
+mapview(world)
+
 ```
 
